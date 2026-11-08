@@ -1,0 +1,80 @@
+# Notari Change Control, secure workflow template.
+#
+# Copy this into .github/workflows/notari-check.yml in your repo.
+#
+# WHY pull_request_target: the 'pull_request' event runs the PR's version of
+# the workflow, so an AI agent (or any contributor) can modify the workflow to
+# remove the Notari step and the gate never fires. 'pull_request_target' runs
+# from the BASE branch (main), so only merged code controls the gate. This is
+# non-negotiable for base-controlled enforcement.
+#
+# SAFETY: the PR is checked out into a DATA-ONLY subdirectory (_pr_checkout).
+# No trusted Python process runs with that directory as cwd or on sys.path.
+# Notari is installed from PyPI in isolated mode (python -I), and the wrapper
+# reads the checkout only via git commands. persist-credentials is false so
+# the token is not written into the candidate tree.
+#
+name: notari-change-control
+
+on:
+  pull_request_target:
+    branches: [main]
+
+permissions:
+  contents: read
+  statuses: write
+
+jobs:
+  change-control:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout PR head (data-only, isolated subdirectory)
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0  # v7.0.0
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          path: _pr_checkout
+          persist-credentials: false
+          # The signed boundary reads this checkout as data. Keep builds in a separate workflow.
+          allow-unsafe-pr-checkout: true
+
+      - name: Notari Change Control
+        uses: manumarri-sudo/notari@64ae07fd3885a2ccc4543b0cdd8c9031a8b7f174  # 0.5.2 release action, SHA-pinned; bump on release
+        with:
+          head: ${{ github.event.pull_request.head.sha }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
+          mode: "boundary"
+          strict: "true"
+          fail-on-block: "true"
+          # Fail the job on NEEDS_REVIEW too, not just BLOCK. Without this a
+          # review-class finding (a submodule-pointer swap, a symlink redirected
+          # out of scope, a sensitive-surface change) exits 0 and can merge on a
+          # green required check with no human having looked (security red-team
+          # 2026-07-22, finding 3). The hardened template opts into blocking so
+          # the default posture is safe; drop it to "false" only if you have a
+          # separate human-review gate for NEEDS_REVIEW.
+          block-on-review: "true"
+          # checkout-path tells the wrapper which subdirectory holds the candidate
+          # git repo. Without it the wrapper runs from the workspace root (no repo
+          # there) and fails closed. It MUST match the checkout `path:` above.
+          checkout-path: _pr_checkout
+          gate-key: ${{ secrets.NOTARI_GATE_KEY }}
+          gate-pubkeys: ${{ vars.NOTARI_GATE_PUBKEYS }}
+          approver-pubkeys: ${{ secrets.NOTARI_APPROVER_PUBKEYS }}
+          # Leave passport-dir at its default (.notari). The wrapper cd's into
+          # checkout-path first, so passport-dir is ALREADY relative to the
+          # candidate checkout; passing "_pr_checkout/.notari" here re-nested it
+          # to _pr_checkout/_pr_checkout/.notari and, worse, manufactured an
+          # intermediate _pr_checkout component inside the checkout that a PR
+          # symlink could redirect (security re-review 2026-07-23, N4 + F1).
+
+      - name: Save signed test evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: change-passport
+          path: |
+            _pr_checkout/.notari/passport.json
+            _pr_checkout/.notari/status-fingerprint
+          include-hidden-files: true
+          if-no-files-found: error
